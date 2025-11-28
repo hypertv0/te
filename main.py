@@ -3,21 +3,16 @@ import os
 import sys
 import re
 import datetime
+import shutil
 from urllib.parse import urlparse, parse_qs
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
-from github import Github
 
 # ================= AYARLAR =================
 BASE_URL = "https://trgoals1472.xyz/"
-GITHUB_TOKEN = os.environ.get("MY_GITHUB_TOKEN") 
-REPO_NAME = os.environ.get("GITHUB_REPOSITORY") 
-FILE_PATH = "playlist.m3u"
-
-# Tarayıcı gibi görünmek için sabit User-Agent
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 # ===========================================
 
@@ -33,7 +28,7 @@ def init_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--mute-audio")
-    chrome_options.add_argument(f"user-agent={USER_AGENT}") # User-Agent'ı buraya da ekledik
+    chrome_options.add_argument(f"user-agent={USER_AGENT}")
     chrome_options.page_load_strategy = 'eager'
     
     service = Service(ChromeDriverManager().install())
@@ -76,7 +71,7 @@ def get_channel_list(driver):
                     if channel_id:
                         channels.append({
                             "name": name, 
-                            "url": full_url, # Bu aynı zamanda bizim REFERER linkimiz
+                            "url": full_url,
                             "id": channel_id
                         })
                 
@@ -87,15 +82,11 @@ def get_channel_list(driver):
         return []
 
 def extract_base_url(driver, channel_url):
-    """Sadece base url'i (https://...sbs/) bulur"""
     try:
         driver.get(channel_url)
         time.sleep(1)
         html_source = driver.page_source
-        
-        # Regex ile 'const baseurl' bul
         match = re.search(r'const\s+baseurl\s*=\s*["\']([^"\']+)["\'];', html_source)
-        
         if match:
             return match.group(1)
         return None
@@ -103,28 +94,16 @@ def extract_base_url(driver, channel_url):
         log(f"Base URL bulma hatası: {e}")
         return None
 
-def update_github_repo(content):
-    log("--- GITHUB YÜKLEME İŞLEMİ ---")
+def sanitize_filename(name):
+    """Dosya isimlerindeki geçersiz karakterleri temizler"""
+    # Türkçe karakterleri İngilizceye çevir (Opsiyonel ama önerilir)
+    tr_map = {'ı': 'i', 'İ': 'I', 'ğ': 'g', 'Ğ': 'G', 'ü': 'u', 'Ü': 'U', 'ş': 's', 'Ş': 'S', 'ö': 'o', 'Ö': 'O', 'ç': 'c', 'Ç': 'C'}
+    for tr, en in tr_map.items():
+        name = name.replace(tr, en)
     
-    # Token yoksa sadece log basar (Github Actions kullanmıyorsan test için)
-    if not GITHUB_TOKEN or not REPO_NAME:
-        log("Github Token veya Repo adı yok. Yükleme atlandı.")
-        return
-
-    try:
-        g = Github(GITHUB_TOKEN)
-        repo = g.get_repo(REPO_NAME)
-        
-        try:
-            contents = repo.get_contents(FILE_PATH)
-            repo.update_file(contents.path, f"Güncelleme {datetime.datetime.now()}", content, contents.sha)
-            log("✅ M3U dosyası güncellendi.")
-        except:
-            repo.create_file(FILE_PATH, "İlk oluşturma", content)
-            log("✅ Yeni M3U dosyası oluşturuldu.")
-
-    except Exception as e:
-        log(f"❌ GITHUB HATASI: {e}")
+    # Geçersiz karakterleri sil, boşlukları alt çizgi yap
+    name = re.sub(r'[\\/*?:"<>|]', "", name)
+    return name.strip().replace(" ", "_")
 
 def main():
     driver = None
@@ -136,8 +115,6 @@ def main():
             return
 
         current_base_url = None
-        
-        # Base URL'i bulana kadar ilk birkaç kanalı dene
         for i in range(min(5, len(channels))):
             log(f"Base URL aranıyor ({i+1})...")
             found_base = extract_base_url(driver, channels[i]['url'])
@@ -150,43 +127,50 @@ def main():
             log("❌ HATA: Base URL bulunamadı.")
             return
 
-        # Linkleri Oluştur ve Header Ekle
+        # Klasör Hazırlığı
+        if os.path.exists("channels"):
+            shutil.rmtree("channels") # Eski klasörü sil
+        os.makedirs("channels") # Yeni klasör oluştur
+
         m3u_content = "#EXTM3U\n"
         count = 0
         
         for channel in channels:
-            # Base URL sonuna slash ekle
             if not current_base_url.endswith("/"):
                 base = current_base_url + "/"
             else:
                 base = current_base_url
                 
-            # Ham m3u8 linki
             raw_link = f"{base}{channel['id']}.m3u8"
-            
-            # REFERER BELİRLEME:
-            # Referer genellikle yayının olduğu sayfanın kendisidir.
-            # channel['url'] bizim referer linkimizdir (örn: https://trgoals.../channel.html?id=yayin1)
-            # Ancak garanti olsun diye ana domaini de ekleyebiliriz ama sayfa linki en garantisidir.
             referer_url = channel['url']
             
-            # User-Agent ve Referer'i linkin sonuna pipe (|) ile ekliyoruz.
-            # Birçok IPTV player (VLC, TiviMate, OTT Navigator) bu formatı tanır.
+            # Headerlı link
             final_link_with_headers = f"{raw_link}|Referer={referer_url}&User-Agent={USER_AGENT}"
             
+            # 1. Ana M3U Dosyasına Ekle
             m3u_content += f'#EXTINF:-1 group-title="Canlı TV", {channel["name"]}\n'
             m3u_content += f'{final_link_with_headers}\n'
+            
+            # 2. Tekil M3U8 Dosyası Oluştur (Channels klasörüne)
+            clean_name = sanitize_filename(channel["name"])
+            file_name = f"channels/{clean_name}.m3u8"
+            
+            # Tekil dosya içeriği de bir M3U playlist olmalı ki header çalışsın
+            individual_content = "#EXTM3U\n"
+            individual_content += f'#EXTINF:-1,{channel["name"]}\n'
+            individual_content += f'{final_link_with_headers}'
+            
+            with open(file_name, "w", encoding="utf-8") as f:
+                f.write(individual_content)
+
             count += 1
             
-        log(f"Toplam {count} adet link (Headerlı) hazırlandı.")
+        # Ana M3U dosyasını kaydet
+        with open("playlist.m3u", "w", encoding="utf-8") as f:
+            f.write(m3u_content)
 
-        if count > 0:
-            update_github_repo(m3u_content)
-            
-            # Yedek olarak ekrana bas (Test için)
-            log("\n--- ÖRNEK ÇIKTI (İlk 3 Satır) ---")
-            print('\n'.join(m3u_content.split('\n')[:6])) 
-            log("...")
+        log(f"İşlem Tamamlandı: {count} kanal.")
+        log("Dosyalar diske kaydedildi, Github'a pushlanmayı bekliyor.")
 
     except Exception as e:
         log(f"Genel Hata: {e}")
