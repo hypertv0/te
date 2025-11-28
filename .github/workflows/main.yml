@@ -1,0 +1,31 @@
+name: TRGoals M3U Güncelleyici
+
+on:
+  schedule:
+    # Her 30 dakikada bir çalışır (Saat başı ve buçuklarda)
+    # GitHub bazen yoğunluğa göre bunu biraz geciktirebilir.
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Manuel olarak butona basıp çalıştırmak için
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Depoyu Çek (Checkout)
+        uses: actions/checkout@v3
+
+      - name: Python Kurulumu
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Gerekli Kütüphaneleri Yükle
+        run: |
+          pip install -r requirements.txt
+
+      - name: Botu Çalıştır
+        env:
+          # Github Token'ı buraya Secret olarak veriyoruz
+          MY_GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
+        run: python main.py
