@@ -2,10 +2,8 @@ name: TRGoals M3U Güncelleyici
 
 on:
   schedule:
-    # Her 30 dakikada bir çalışır (Saat başı ve buçuklarda)
-    # GitHub bazen yoğunluğa göre bunu biraz geciktirebilir.
-    - cron: '*/30 * * * *'
-  workflow_dispatch: # Manuel olarak butona basıp çalıştırmak için
+    - cron: '*/30 * * * *' # 30 dakikada bir
+  workflow_dispatch:
 
 jobs:
   build:
@@ -24,8 +22,11 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Chrome Kurulumu (Garanti olsun diye)
+        uses: browser-actions/setup-chrome@latest
+
       - name: Botu Çalıştır
         env:
-          # Github Token'ı buraya Secret olarak veriyoruz
           MY_GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
-        run: python main.py
+          PYTHONUNBUFFERED: "1" # Çıktıları anlık görmek için
+        run: python -u main.py
