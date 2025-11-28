@@ -2,18 +2,19 @@ name: TRGoals M3U Güncelleyici
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    - cron: '*/30 * * * *' # 30 dakikada bir çalış
+  workflow_dispatch: # Manuel tetikleme butonu
 
+# Github token'ına yazma izni ver
 permissions:
-  contents: write  # <--- BU SATIR ÇOK ÖNEMLİ (Yazma izni verir)
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Depoyu Çek
+      - name: Depoyu Çek (Checkout)
         uses: actions/checkout@v3
 
       - name: Python Kurulumu
@@ -28,8 +29,20 @@ jobs:
       - name: Chrome Kurulumu
         uses: browser-actions/setup-chrome@latest
 
-      - name: Botu Çalıştır
-        env:
-          # Kendi tokenin yerine github'ın verdigini kullaniyoruz
-          MY_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+      - name: Botu Çalıştır ve Dosyaları Oluştur
         run: python -u main.py
+
+      - name: Değişiklikleri Github'a Gönder (Git Push)
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          
+          # Sadece değişenleri ekle
+          git add playlist.m3u
+          git add channels/
+          
+          # Değişiklik varsa commit et, yoksa hata verme
+          git commit -m "Otomatik Güncelleme: $(date)" || echo "Değişiklik yok"
+          
+          # Repoya geri yükle
+          git push
