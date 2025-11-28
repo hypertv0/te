@@ -2,15 +2,18 @@ name: TRGoals M3U Güncelleyici
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # 30 dakikada bir
+    - cron: '*/30 * * * *'
   workflow_dispatch:
+
+permissions:
+  contents: write  # <--- BU SATIR ÇOK ÖNEMLİ (Yazma izni verir)
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Depoyu Çek (Checkout)
+      - name: Depoyu Çek
         uses: actions/checkout@v3
 
       - name: Python Kurulumu
@@ -18,15 +21,15 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Gerekli Kütüphaneleri Yükle
+      - name: Kütüphaneleri Yükle
         run: |
           pip install -r requirements.txt
 
-      - name: Chrome Kurulumu (Garanti olsun diye)
+      - name: Chrome Kurulumu
         uses: browser-actions/setup-chrome@latest
 
       - name: Botu Çalıştır
         env:
-          MY_GITHUB_TOKEN: ${{ secrets.MY_GITHUB_TOKEN }}
-          PYTHONUNBUFFERED: "1" # Çıktıları anlık görmek için
+          # Kendi tokenin yerine github'ın verdigini kullaniyoruz
+          MY_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: python -u main.py
