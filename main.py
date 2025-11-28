@@ -1,8 +1,9 @@
 import time
-import json
 import os
 import sys
+import re
 import datetime
+from urllib.parse import urlparse, parse_qs
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -18,106 +19,114 @@ FILE_PATH = "playlist.m3u"
 # ===========================================
 
 def log(message):
-    """Logları anında yazdırmak için yardımcı fonksiyon"""
     print(f"[{datetime.datetime.now()}] {message}")
-    sys.stdout.flush() # Çıktıyı zorla yazdır
+    sys.stdout.flush()
 
 def init_driver():
     log("Chrome ayarları yapılıyor...")
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new") # Yeni headless modu
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--remote-debugging-port=9222")
     chrome_options.add_argument("--mute-audio")
-    chrome_options.add_argument('--ignore-certificate-errors')
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
     
-    # ÇOK ÖNEMLİ: Sayfanın tamamen yüklenmesini bekleme (reklamlar yüzünden donmaması için)
+    # Artık network loglarına ihtiyacımız yok ama hızlı yükleme stratejisi kalsın
     chrome_options.page_load_strategy = 'eager'
     
-    chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-    
-    log("Driver yükleniyor...")
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    # Sayfa yükleme zaman aşımı (30 saniye)
     driver.set_page_load_timeout(30)
-    log("Driver başlatıldı.")
     return driver
 
 def get_channel_list(driver):
     log(f"Ana sayfa taranıyor: {BASE_URL}")
     try:
         driver.get(BASE_URL)
-        # Eager modda olduğumuz için elementin görünmesini biraz bekleyelim
-        time.sleep(5)
+        time.sleep(3) # Sayfa iskeletinin yüklenmesi için kısa bekleme
         
         soup = BeautifulSoup(driver.page_source, "html.parser")
         channels = []
         
         channel_list_div = soup.find("div", {"id": "channelList"})
         if not channel_list_div:
-            log("Kanal listesi div'i bulunamadı.")
+            log("Kanal listesi bulunamadı.")
             return []
 
+        # Hem maçlar hem 7/24 kanalları al
         links = channel_list_div.find_all("a", class_="channel-item")
         
         for link in links:
             name_div = link.find("div", class_="channel-name")
             if name_div:
                 name = name_div.get_text(strip=True)
-                href = link.get("href")
-                if href and not href.startswith("http"):
-                    full_url = BASE_URL.rstrip("/") + href
-                else:
-                    full_url = href
-                channels.append({"name": name, "url": full_url})
+                href = link.get("href") # /channel.html?id=yayin1
+                
+                # Full URL oluştur
+                if href:
+                    if not href.startswith("http"):
+                        full_url = BASE_URL.rstrip("/") + href if href.startswith("/") else BASE_URL + href
+                    else:
+                        full_url = href
+                    
+                    # URL'den ID'yi çek (örn: yayin1)
+                    parsed = urlparse(full_url)
+                    query = parse_qs(parsed.query)
+                    channel_id = query.get('id', [None])[0]
+
+                    if channel_id:
+                        channels.append({
+                            "name": name, 
+                            "url": full_url,
+                            "id": channel_id
+                        })
                 
         log(f"Toplam {len(channels)} kanal bulundu.")
         return channels
     except Exception as e:
-        log(f"Kanal listesi alma hatası: {e}")
+        log(f"Kanal listesi hatası: {e}")
         return []
 
-def get_m3u8_from_logs(driver, url):
-    log(f"Link taranıyor: {url}")
+def extract_real_m3u8(driver, channel_url, channel_id):
+    """
+    Sayfa kaynağındaki JavaScript kodundan 'baseurl' değişkenini bulur
+    ve ID ile birleştirerek gerçek linki üretir.
+    """
     try:
-        driver.get(url)
-        time.sleep(8) # Playerın yüklenmesi için bekle
+        driver.get(channel_url)
+        # Playerın yüklenmesini beklemeye gerek yok, kaynak kod yeterli
+        # Ancak JS değişkenlerinin render olması için çok kısa bekleyelim
+        time.sleep(1)
         
-        logs = driver.get_log("performance")
-        found_link = None
-
-        for entry in logs:
-            try:
-                message_obj = json.loads(entry["message"])
-                message = message_obj["message"]
-                if "Network.requestWillBeSent" in message["method"]:
-                    request_url = message["params"]["request"]["url"]
-                    
-                    if ".m3u8" in request_url and "ad-delivery" not in request_url:
-                        found_link = request_url
-                        # Döngüden çıkma, son bulunanı al (genellikle en doğrusu sondakidir)
-            except:
-                continue
+        html_source = driver.page_source
         
-        if found_link:
-            log(f"BULUNDU: ...{found_link[-30:]}")
-            return found_link
+        # Regex ile 'const baseurl = "..."' yapısını ara
+        # Örnek: const baseurl = "https://h29.04bf112a615942b35.sbs/";
+        match = re.search(r'const\s+baseurl\s*=\s*["\']([^"\']+)["\'];', html_source)
+        
+        if match:
+            base_url = match.group(1)
+            # Link oluşturma mantığı: baseurl + id + .m3u8
+            real_m3u8 = f"{base_url}{channel_id}.m3u8"
+            
+            # Bazı durumlarda baseurl slash ile bitmeyebilir
+            if not base_url.endswith("/"):
+                real_m3u8 = f"{base_url}/{channel_id}.m3u8"
+                
+            log(f"Link Üretildi: {real_m3u8}")
+            return real_m3u8
         else:
-            log("M3U8 bulunamadı.")
+            log(f"Base URL bulunamadı: {channel_id}")
             return None
 
     except Exception as e:
-        log(f"Sayfa hatası: {e}")
+        log(f"Link çıkarma hatası: {e}")
         return None
 
 def update_github_repo(content):
     if not GITHUB_TOKEN or not REPO_NAME:
-        log("Github Token veya Repo adı eksik! İşlem yapılmadı.")
+        log("Github Token veya Repo bilgisi eksik. Kayıt yapılmadı.")
         return
 
     try:
@@ -126,13 +135,13 @@ def update_github_repo(content):
         
         try:
             contents = repo.get_contents(FILE_PATH)
-            repo.update_file(contents.path, f"Güncelleme {datetime.datetime.now()}", content, contents.sha)
-            log("M3U dosyası güncellendi.")
+            repo.update_file(contents.path, f"Update {datetime.datetime.now()}", content, contents.sha)
+            log("Github dosyası güncellendi.")
         except:
-            repo.create_file(FILE_PATH, "İlk yükleme", content)
-            log("M3U dosyası oluşturuldu.")
+            repo.create_file(FILE_PATH, "Initial create", content)
+            log("Github dosyası oluşturuldu.")
     except Exception as e:
-        log(f"Github işlem hatası: {e}")
+        log(f"Github hatası: {e}")
 
 def main():
     driver = None
@@ -141,37 +150,50 @@ def main():
         channels = get_channel_list(driver)
         
         if not channels:
-            log("Kanal listesi boş, çıkılıyor.")
             return
 
         m3u_content = "#EXTM3U\n"
+        valid_count = 0
         
-        # Test için sadece ilk 5 kanalı tarayalım (Hız testi için)
-        # Gerçek kullanımda [:5] kısmını kaldırın: "for channel in channels:" yapın
-        count = 0
+        # Base URL genellikle tüm kanallar için aynıdır.
+        # Her sayfa için tekrar tekrar tarayıcıyı yormak yerine
+        # İlk kanaldan baseurl'i alıp diğerlerine uygulayabiliriz.
+        # Ancak site yapısı değişirse diye şimdilik her sayfaya girip teyit edelim.
+        # Hızlandırmak için: İlk kanaldan base_url alıp döngüde kullanabilirsin.
+        
+        current_base_url = None
+        
         for channel in channels:
-            m3u8_url = get_m3u8_from_logs(driver, channel['url'])
-            if m3u8_url:
-                m3u_content += f'#EXTINF:-1 group-title="Canlı", {channel["name"]}\n'
-                m3u_content += f'{m3u8_url}\n'
-                count += 1
+            # Eğer base_url'i henüz bulamadıysak veya her seferinde kontrol etmek istiyorsak:
+            # Performans için: Sadece ilk kanalda base_url bul, diğerlerinde ID değiştir.
             
-            # Botun aşırı yorulmaması için kısa bekleme
-            time.sleep(1) 
-        
-        log(f"Toplam {count} adet link bulundu.")
+            if current_base_url is None:
+                # İlk kanaldan base_url'i çekmeye çalış
+                real_link = extract_real_m3u8(driver, channel['url'], channel['id'])
+                if real_link:
+                    # Linkten base_url kısmını ayıkla
+                    # real_link: https://site.com/yayint2.m3u8 -> base: https://site.com/
+                    current_base_url = real_link.replace(f"{channel['id']}.m3u8", "")
+            else:
+                # Base URL zaten bulunduysa direkt oluştur
+                real_link = f"{current_base_url}{channel['id']}.m3u8"
+                log(f"Hızlı Üretim: {real_link}")
 
-        if count > 0:
+            if real_link:
+                m3u_content += f'#EXTINF:-1 group-title="Canlı", {channel["name"]}\n'
+                m3u_content += f'{real_link}\n'
+                valid_count += 1
+            
+        if valid_count > 0:
             update_github_repo(m3u_content)
         else:
-            log("Hiç link bulunamadığı için güncelleme yapılmadı.")
+            log("Hiç link üretilemedi.")
 
     except Exception as e:
-        log(f"Kritik hata: {e}")
+        log(f"Genel Hata: {e}")
     finally:
         if driver:
             driver.quit()
-            log("Driver kapatıldı.")
 
 if __name__ == "__main__":
     main()
