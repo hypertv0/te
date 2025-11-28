@@ -13,10 +13,12 @@ from github import Github
 
 # ================= AYARLAR =================
 BASE_URL = "https://trgoals1472.xyz/"
-# Github Actions ortam değişkenlerinden bilgileri al
 GITHUB_TOKEN = os.environ.get("MY_GITHUB_TOKEN") 
 REPO_NAME = os.environ.get("GITHUB_REPOSITORY") 
 FILE_PATH = "playlist.m3u"
+
+# Tarayıcı gibi görünmek için sabit User-Agent
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 # ===========================================
 
 def log(message):
@@ -31,7 +33,7 @@ def init_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--mute-audio")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+    chrome_options.add_argument(f"user-agent={USER_AGENT}") # User-Agent'ı buraya da ekledik
     chrome_options.page_load_strategy = 'eager'
     
     service = Service(ChromeDriverManager().install())
@@ -74,7 +76,7 @@ def get_channel_list(driver):
                     if channel_id:
                         channels.append({
                             "name": name, 
-                            "url": full_url,
+                            "url": full_url, # Bu aynı zamanda bizim REFERER linkimiz
                             "id": channel_id
                         })
                 
@@ -102,44 +104,27 @@ def extract_base_url(driver, channel_url):
         return None
 
 def update_github_repo(content):
-    """Github'a yükleme fonksiyonu - Detaylı Hata Raporlama ile"""
-    log("--- GITHUB YÜKLEME İŞLEMİ BAŞLIYOR ---")
+    log("--- GITHUB YÜKLEME İŞLEMİ ---")
     
-    # 1. Kontrol: Değişkenler dolu mu?
-    if not GITHUB_TOKEN:
-        log("HATA: 'MY_GITHUB_TOKEN' bulunamadı! Github Secrets ayarlarını kontrol et.")
+    # Token yoksa sadece log basar (Github Actions kullanmıyorsan test için)
+    if not GITHUB_TOKEN or not REPO_NAME:
+        log("Github Token veya Repo adı yok. Yükleme atlandı.")
         return
-    if not REPO_NAME:
-        log("HATA: 'GITHUB_REPOSITORY' bulunamadı! Repo adı çekilemedi.")
-        return
-
-    log(f"Hedef Repo: {REPO_NAME}")
-    log(f"Hedef Dosya: {FILE_PATH}")
 
     try:
-        # 2. Kontrol: Bağlantı
         g = Github(GITHUB_TOKEN)
         repo = g.get_repo(REPO_NAME)
-        log("Repo bağlantısı başarılı.")
         
-        # 3. Kontrol: Dosya var mı yok mu?
         try:
             contents = repo.get_contents(FILE_PATH)
-            log(f"Dosya mevcut, güncelleniyor... (SHA: {contents.sha})")
-            repo.update_file(contents.path, f"Otomatik Güncelleme {datetime.datetime.now()}", content, contents.sha)
-            log("✅ BAŞARILI: M3U dosyası Github üzerinde güncellendi.")
-        except Exception as e:
-            # Dosya yoksa oluşturmayı dene (404 hatası normaldir)
-            log("Dosya repoda bulunamadı, yeni oluşturuluyor...")
-            try:
-                repo.create_file(FILE_PATH, "İlk otomatik oluşturma", content)
-                log("✅ BAŞARILI: Yeni M3U dosyası oluşturuldu.")
-            except Exception as create_error:
-                log(f"❌ KRİTİK HATA (Dosya Oluşturma): {create_error}")
-                log("İPUCU: Token yetkilerini kontrol et. 'Repo' ve 'Workflow' kutucukları işaretli mi?")
+            repo.update_file(contents.path, f"Güncelleme {datetime.datetime.now()}", content, contents.sha)
+            log("✅ M3U dosyası güncellendi.")
+        except:
+            repo.create_file(FILE_PATH, "İlk oluşturma", content)
+            log("✅ Yeni M3U dosyası oluşturuldu.")
 
     except Exception as e:
-        log(f"❌ KRİTİK HATA (Genel): {e}")
+        log(f"❌ GITHUB HATASI: {e}")
 
 def main():
     driver = None
@@ -148,14 +133,13 @@ def main():
         channels = get_channel_list(driver)
         
         if not channels:
-            log("Kanal listesi boş.")
             return
 
         current_base_url = None
         
         # Base URL'i bulana kadar ilk birkaç kanalı dene
         for i in range(min(5, len(channels))):
-            log(f"Base URL aranıyor (Deneme {i+1})...")
+            log(f"Base URL aranıyor ({i+1})...")
             found_base = extract_base_url(driver, channels[i]['url'])
             if found_base:
                 current_base_url = found_base
@@ -163,40 +147,49 @@ def main():
                 break
         
         if not current_base_url:
-            log("❌ HATA: Hiçbir kanaldan yayın linki (baseurl) çekilemedi.")
+            log("❌ HATA: Base URL bulunamadı.")
             return
 
-        # Linkleri Oluştur
+        # Linkleri Oluştur ve Header Ekle
         m3u_content = "#EXTM3U\n"
         count = 0
         
         for channel in channels:
-            # Slash kontrolü
+            # Base URL sonuna slash ekle
             if not current_base_url.endswith("/"):
                 base = current_base_url + "/"
             else:
                 base = current_base_url
                 
-            real_link = f"{base}{channel['id']}.m3u8"
+            # Ham m3u8 linki
+            raw_link = f"{base}{channel['id']}.m3u8"
+            
+            # REFERER BELİRLEME:
+            # Referer genellikle yayının olduğu sayfanın kendisidir.
+            # channel['url'] bizim referer linkimizdir (örn: https://trgoals.../channel.html?id=yayin1)
+            # Ancak garanti olsun diye ana domaini de ekleyebiliriz ama sayfa linki en garantisidir.
+            referer_url = channel['url']
+            
+            # User-Agent ve Referer'i linkin sonuna pipe (|) ile ekliyoruz.
+            # Birçok IPTV player (VLC, TiviMate, OTT Navigator) bu formatı tanır.
+            final_link_with_headers = f"{raw_link}|Referer={referer_url}&User-Agent={USER_AGENT}"
             
             m3u_content += f'#EXTINF:-1 group-title="Canlı TV", {channel["name"]}\n'
-            m3u_content += f'{real_link}\n'
+            m3u_content += f'{final_link_with_headers}\n'
             count += 1
             
-        log(f"Toplam {count} adet link hazırlandı.")
+        log(f"Toplam {count} adet link (Headerlı) hazırlandı.")
 
-        # Github'a yükle
         if count > 0:
             update_github_repo(m3u_content)
             
-            # Yükleme başarısız olursa diye LOGLARA da basıyoruz:
-            log("\n--- OLUŞTURULAN DOSYA İÇERİĞİ (Yedek) ---")
-            print(m3u_content) # sys.stdout.flush gerekmez print sonunda yapar ama yine de:
-            sys.stdout.flush()
-            log("-------------------------------------------")
+            # Yedek olarak ekrana bas (Test için)
+            log("\n--- ÖRNEK ÇIKTI (İlk 3 Satır) ---")
+            print('\n'.join(m3u_content.split('\n')[:6])) 
+            log("...")
 
     except Exception as e:
-        log(f"Ana döngü hatası: {e}")
+        log(f"Genel Hata: {e}")
     finally:
         if driver:
             driver.quit()
