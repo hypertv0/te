@@ -23,57 +23,58 @@ KANALLAR = {
     "Star_TV": "2192971293555936a8b7c7",
     "TRT_1": "16522001356210d1dcce12",
     "S_Sport": "2123273598f3ea83219516"
-    # Diğer kanalları buraya ekleyebilirsiniz...
+    # Diğer kanal ID'lerini buraya ekleyebilirsiniz...
 }
 
 def get_stream_url_with_selenium(channel_id):
     """Selenium kullanarak bir Kool.to kanalının nihai M3U8 linkini yakalar."""
     print(f"[*] Selenium başlatılıyor: {channel_id}")
     
-    # Selenium için Chrome ayarları
     chrome_options = Options()
-    chrome_options.add_argument("--headless")  # Tarayıcıyı arayüz olmadan (arka planda) çalıştır
+    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--log-level=3")
+    # Ağ trafiğini dinlemek için bu ayar kritik
     chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
 
+    driver = None  # driver değişkenini başta tanımla
     try:
-        # Chrome sürücüsünü otomatik olarak kur ve başlat
         driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=chrome_options)
         
         target_url = f"https://kool.to/kool-iptv/play/{channel_id}"
         print(f"[*] Sayfa açılıyor: {target_url}")
         driver.get(target_url)
         
-        # Sayfanın yüklenmesi ve JavaScript'in çalışması için biraz bekle
-        time.sleep(10) 
+        # Sayfanın yüklenmesi ve JavaScript'in API çağrılarını yapması için bekle
+        time.sleep(15) 
         
         print("[*] Ağ trafiği logları taranıyor...")
         logs = driver.get_log('performance')
         
+        m3u8_url = None
         # Ağ trafiği içinde .m3u8 linkini ara
         for log in logs:
             message = json.loads(log['message'])['message']
-            if 'Network.responseReceived' in message['method']:
-                url = message['params']['response']['url']
+            # Ağdaki isteğin URL'sini al
+            if 'Network.requestWillBeSent' in message['method']:
+                url = message['params']['request']['url']
+                # Eğer 'sunshine' ve '.m3u8' içeriyorsa, bu bizim aradığımız linktir
                 if '.m3u8' in url and 'sunshine' in url:
                     print(f"{GREEN}[OK] Nihai M3U8 linki yakalandı!{RESET}")
-                    driver.quit()
-                    return url
+                    m3u8_url = url
+                    break # Linki bulduğumuz an döngüden çık
                     
-        print(f"{ERROR} 10 saniye içinde M3U8 linki bulunamadı.")
         driver.quit()
-        return None
+        return m3u8_url
 
     except Exception as e:
         print(f"{ERROR} Selenium çalışırken bir hata oluştu: {e}")
-        if 'driver' in locals():
+        if driver:
             driver.quit()
         return None
 
 def m3u8_dosyalarini_olustur():
-    """Tüm kanallar için 'kanallar' klasörüne ayrı .m3u8 dosyaları oluşturur."""
     output_dir = "kanallar"
     os.makedirs(output_dir, exist_ok=True)
     print(f"\n{INFO} '{output_dir}' klasörüne M3U8 dosyaları oluşturuluyor...")
