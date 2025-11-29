@@ -1,102 +1,107 @@
-import time
 import os
+import re
+import time
+import json
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
+from webdriver_manager.chrome import ChromeDriverManager
 
-class VavooScraper:
-    def __init__(self):
-        self.base_url = "https://vavoo.to"
-        self.output_file = "vavoo_playlist.m3u"
-        
-        # Headless Chrome Ayarları (GitHub Actions uyumlu)
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        
-        self.driver = webdriver.Chrome(options=chrome_options)
+# Renk kodları
+GREEN = '\033[92m'
+RED = '\033[91m'
+RESET = '\033[0m'
+INFO = f"{GREEN}[INFO]{RESET}"
+ERROR = f"{RED}[HATA]{RESET}"
 
-    def scroll_channel_list(self):
-        """Kanal listesini aşağı kaydırarak tüm kanalların yüklenmesini sağlar."""
-        print("Siteye gidiliyor...")
-        self.driver.get(self.base_url)
+# Hangi kanalların ID'lerini bildiğimizi buraya yazıyoruz
+KANALLAR = {
+    "Bein_Sports_1": "2113462398d8dd57a8ea73",
+    "ATV": "1332310706bfa3901bee7c",
+    "Kanal_D": "1677679684b9f4fab2cdc5",
+    "Show_TV": "879588960066fd4ecca93",
+    "Star_TV": "2192971293555936a8b7c7",
+    "TRT_1": "16522001356210d1dcce12",
+    "S_Sport": "2123273598f3ea83219516"
+    # Diğer kanalları buraya ekleyebilirsiniz...
+}
+
+def get_stream_url_with_selenium(channel_id):
+    """Selenium kullanarak bir Kool.to kanalının nihai M3U8 linkini yakalar."""
+    print(f"[*] Selenium başlatılıyor: {channel_id}")
+    
+    # Selenium için Chrome ayarları
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")  # Tarayıcıyı arayüz olmadan (arka planda) çalıştır
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--log-level=3")
+    chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+
+    try:
+        # Chrome sürücüsünü otomatik olarak kur ve başlat
+        driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=chrome_options)
         
-        try:
-            # Kanal listesini içeren kaydırılabilir div'i bul
-            scrollable_div = WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "div[style*='overflow: hidden scroll']"))
-            )
-            print("Liste bulundu, tüm kanallar yükleniyor...")
+        target_url = f"https://kool.to/kool-iptv/play/{channel_id}"
+        print(f"[*] Sayfa açılıyor: {target_url}")
+        driver.get(target_url)
+        
+        # Sayfanın yüklenmesi ve JavaScript'in çalışması için biraz bekle
+        time.sleep(10) 
+        
+        print("[*] Ağ trafiği logları taranıyor...")
+        logs = driver.get_log('performance')
+        
+        # Ağ trafiği içinde .m3u8 linkini ara
+        for log in logs:
+            message = json.loads(log['message'])['message']
+            if 'Network.responseReceived' in message['method']:
+                url = message['params']['response']['url']
+                if '.m3u8' in url and 'sunshine' in url:
+                    print(f"{GREEN}[OK] Nihai M3U8 linki yakalandı!{RESET}")
+                    driver.quit()
+                    return url
+                    
+        print(f"{ERROR} 10 saniye içinde M3U8 linki bulunamadı.")
+        driver.quit()
+        return None
+
+    except Exception as e:
+        print(f"{ERROR} Selenium çalışırken bir hata oluştu: {e}")
+        if 'driver' in locals():
+            driver.quit()
+        return None
+
+def m3u8_dosyalarini_olustur():
+    """Tüm kanallar için 'kanallar' klasörüne ayrı .m3u8 dosyaları oluşturur."""
+    output_dir = "kanallar"
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"\n{INFO} '{output_dir}' klasörüne M3U8 dosyaları oluşturuluyor...")
+    
+    kanallar_olusturuldu = 0
+    for kanal_adi, kanal_id in KANALLAR.items():
+        print(f"\n--- İşleniyor: {kanal_adi} ---")
+        final_url = get_stream_url_with_selenium(kanal_id)
+        
+        if final_url:
+            # Bu basit bir yönlendirme dosyası olacak
+            m3u8_icerik = f"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\n{final_url}"
+            dosya_yolu = os.path.join(output_dir, f"{kanal_adi}.m3u8")
+            try:
+                with open(dosya_yolu, 'w', encoding='utf-8') as f:
+                    f.write(m3u8_icerik)
+                print(f"{GREEN}[OK] Oluşturuldu: {dosya_yolu}{RESET}")
+                kanallar_olusturuldu += 1
+            except Exception as e:
+                print(f"{ERROR} Dosya yazılırken sorun oluştu ({dosya_yolu}): {e}")
+        else:
+            print(f"{ERROR} {kanal_adi} için yayın linki alınamadı, bu kanal atlanıyor.")
             
-            last_height = self.driver.execute_script("return arguments[0].scrollHeight", scrollable_div)
-            
-            while True:
-                # En alta kaydır
-                self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scrollable_div)
-                time.sleep(1.5)  # Yükleme beklemesi
-                
-                new_height = self.driver.execute_script("return arguments[0].scrollHeight", scrollable_div)
-                if new_height == last_height:
-                    break
-                last_height = new_height
-                
-        except Exception as e:
-            print(f"Scroll hatası: {e}")
-
-    def extract_and_save(self):
-        """HTML'den verileri çeker ve M3U oluşturur."""
-        print("HTML analiz ediliyor...")
-        soup = BeautifulSoup(self.driver.page_source, "html.parser")
-        
-        buttons = soup.find_all("button", id=lambda x: x and x.startswith("channel-"))
-        
-        if not buttons:
-            print("Kanal bulunamadı.")
-            return
-
-        print(f"Toplam {len(buttons)} kanal işleniyor.")
-        
-        with open(self.output_file, "w", encoding="utf-8") as f:
-            f.write("#EXTM3U\n")
-            
-            for btn in buttons:
-                try:
-                    raw_id = btn.get("id")
-                    channel_id = raw_id.replace("channel-", "")
-                    
-                    # İsim ve Grup bulma
-                    name_div = btn.find("div", style=lambda s: s and "white-space: nowrap" in s)
-                    country_span = btn.find("span")
-                    
-                    channel_name = name_div.text.strip() if name_div else "Bilinmeyen Kanal"
-                    group_name = country_span.text.strip() if country_span else "Genel"
-                    
-                    # Oynatılabilir link formatı
-                    stream_url = f"http://vavoo.to/play/{channel_id}.index.m3u8"
-                    
-                    # Dosyaya yazma
-                    f.write(f'#EXTINF:-1 group-title="{group_name}" tvg-id="{channel_id}", {channel_name}\n')
-                    f.write(f"{stream_url}\n")
-                    
-                except Exception:
-                    continue
-
-        print(f"İşlem tamamlandı: {self.output_file}")
-
-    def run(self):
-        try:
-            self.scroll_channel_list()
-            self.extract_and_save()
-        finally:
-            self.driver.quit()
+    return kanallar_olusturuldu
 
 if __name__ == "__main__":
-    scraper = VavooScraper()
-    scraper.run()
+    olusturulan_sayisi = m3u8_dosyalarini_olustur()
+    if olusturulan_sayisi > 0:
+        print(f"\n{GREEN}İşlem tamamlandı! Toplam {olusturulan_sayisi} kanal güncellendi.{RESET}")
+    else:
+        print(f"\n{RED}İşlem tamamlandı ancak hiçbir kanal için link alınamadı.{RESET}")
